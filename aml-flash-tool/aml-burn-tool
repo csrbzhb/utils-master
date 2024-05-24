@@ -1,0 +1,163 @@
+#!/bin/bash
+
+set -e -o pipefail
+
+FLASH_TOOL="$(dirname "$(readlink -fm "$0")")/flash-tool"
+ADNL_TOOL="$(dirname "$(readlink -fm "$0")")/tools/adnl/adnl_burn_pkg"
+KHADAS_TOOL="/usr/local/bin/$(basename $0)"
+
+IMAGE=
+DEVICE=
+BOARD=
+IMAGE_INSTALL_TYPE=
+
+RED='\033[0;31m'
+RESET='\033[m'
+
+error_msg() {
+	echo -e "$RED"ERROR:"$RESET" $1
+}
+
+usage() {
+	echo -e "Usage:"
+	echo -e "emmc:   $0 -b <VIM1|VIM2|VIM3|VIM4> -i <path-to-image>"
+	echo -e "sdcard: $0 -d </dev/sdX> -i <path-to-image>"
+}
+
+flash_sdcard() {
+	pv -tpreb ${IMAGE} | sudo dd of=${DEVICE} conv=notrunc
+	echo "Sync..."
+	sync
+}
+
+## Calculate time
+## $1 - time in seconds
+time_cal() {
+	local minutes
+
+	minutes=$(($1 / 60))
+
+	echo "Time elapsed: $minutes minute(s)."
+}
+
+if [ ! -L $KHADAS_TOOL ]; then
+	error_msg "Please install `basename $0`. Execute 'INSTALL' script to install it."
+	exit 1
+fi
+
+while getopts "d:i:b:Dhr" flag; do
+	case $flag in
+		d)
+		DEVICE="$OPTARG"
+		;;
+		i)
+		IMAGE="$OPTARG"
+		;;
+		b)
+		BOARD="$OPTARG"
+		;;
+		D)
+		DEBUG="--debug"
+		;;
+		r)
+		RESET_BOARD="yes"
+		;;
+		h)
+		usage
+		exit
+		;;
+	esac
+done
+
+if [ ! -f "$IMAGE" ]; then
+	error_msg "Image '$IMAGE' doesn't exist!"
+	usage
+	exit -1
+fi
+
+case $IMAGE in
+	*.xz)
+	echo "Decompressing image ..."
+	xz -d -f $IMAGE
+	IMAGE=${IMAGE::-3}
+	;;
+esac
+
+if [ -z "$BOARD" ]; then
+	BOARD="VIM1"
+fi
+
+partition=$(fdisk -l "$IMAGE" | grep "Disklabel type" | awk -F ": " '{print $2}' || true)
+if [ "$partition" == "dos" ]; then
+	IMAGE_INSTALL_TYPE="SD-USB"
+else
+	IMAGE_INSTALL_TYPE="EMMC"
+fi
+
+start_time=`date +%s`
+
+if [ $DEVICE ]; then
+	if [ ! -b $DEVICE ]; then
+		error_msg "'$DEVICE' is not a block device! Please make sure the device you choose is right."
+		exit -1
+	fi
+
+	if [ "$IMAGE_INSTALL_TYPE" != "SD-USB" ]; then
+		error_msg "Try to burn to SD/USB storage,but the image installation type is '$IMAGE_INSTALL_TYPE', please use 'SD-USB' image!"
+		exit -1
+	fi
+
+	echo "Burning image '$IMAGE' to SD/USB storage..."
+	flash_sdcard
+else
+	if [ "$IMAGE_INSTALL_TYPE" != "EMMC" ]; then
+		error_msg "Try to burn to eMMC storage, but the image installation type is '$IMAGE_INSTALL_TYPE', please use 'EMMC' image!"
+		exit -1
+	fi
+
+	if ! lsusb | grep -q "Amlogic, Inc." > /dev/null; then
+		error_msg "You should put your board enter upgrade mode!"
+		exit -1
+	fi
+
+	if [ "$BOARD" == "VIM1" ] || [ "$BOARD" == "VIM2" ]; then
+		SOC="gxl"
+		DISPLAY_BOARD="VIM1/VIM2"
+	elif [ "$BOARD" == "VIM3" ]; then
+		SOC="g12a"
+		DISPLAY_BOARD="VIM3/VIM3L"
+	elif [ "$BOARD" == "VIM4" ]; then
+		SOC="t7"
+		DISPLAY_BOARD="VIM4"
+	elif [ "$BOARD" == "VIM1S" ]; then
+		SOC="s4"
+		DISPLAY_BOARD="VIM1S"
+	else
+		error_msg "Unsupported board: [$BOARD]"
+		exit -1
+	fi
+
+	echo "Burning image '$IMAGE' for '$DISPLAY_BOARD' to eMMC..."
+	if [ "$BOARD" == "VIM1" ] || [ "$BOARD" == "VIM2" ] || [ "$BOARD" == "VIM3" ]; then
+		if [ "$RESET_BOARD" == "yes" ]; then
+			RESET_BOARD="--reset=y"
+		else
+			RESET_BOARD=
+		fi
+		$FLASH_TOOL --img=$IMAGE --parts=all --wipe --soc=$SOC ${RESET_BOARD} ${DEBUG}
+	elif [ "$BOARD" == "VIM4" ] || [ "$BOARD" == "VIM1S" ]; then
+		if [ "$RESET_BOARD" == "yes" ]; then
+			RESET_BOARD="-r 1"
+		else
+			RESET_BOARD=
+		fi
+		$ADNL_TOOL -p $IMAGE ${RESET_BOARD}
+	fi
+fi
+
+end_time=`date +%s`
+
+time_cal $(($end_time - $start_time))
+
+echo "Done!"
+date

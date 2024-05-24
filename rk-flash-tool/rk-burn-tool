@@ -1,0 +1,133 @@
+#!/bin/bash
+
+set -e -o pipefail
+
+BASE=$(dirname "$(readlink -fm "$0")")
+FLASH_TOOL="$BASE/flash-tool"
+ANDROID_TOOL="$BASE/tools/Linux_Upgrade_Tool/upgrade_tool"
+KHADAS_TOOL="/usr/local/bin/$(basename $0)"
+
+DEVICE=
+IMAGE=
+IMAGE_INSTALL_TYPE=
+
+RED='\033[0;31m'
+RESET='\033[m'
+
+error_msg() {
+	echo -e "$RED"ERROR:"$RESET" $1
+}
+
+usage() {
+	echo -e "Usage:"
+	echo -e "Burn to eMMC: $0 -i <path-to-image>"
+	echo -e "Burn to SD/USB: $0 -d </dev/sdX> -i <path-to-image>"
+}
+
+## Calculate time
+## $1 - time in seconds
+time_cal() {
+	local minutes
+
+	minutes=$(($1 / 60))
+
+	echo "Time elapsed: $minutes minute(s)."
+}
+
+if [ ! -L $KHADAS_TOOL ]; then
+	error_msg "Please install `basename $0`. Execute 'INSTALL' script to install it."
+	exit 1
+fi
+
+while getopts "d:i:h" flag; do
+    case $flag in
+		d)
+		DEVICE="$OPTARG"
+		if [ ! -b "$DEVICE" ]; then
+			error_msg "Device '$DEVICE' doesn't exist!"
+			usage
+			exit -1
+		fi
+		;;
+		i)
+		IMAGE="$OPTARG"
+		;;
+		h)
+		usage
+		exit
+		;;
+	esac
+done
+
+if [ ! -f "$IMAGE" ]; then
+	error_msg "Image file '$IMAGE' doesn't exist!"
+	usage
+	exit 1
+fi
+
+case $IMAGE in
+	*.xz)
+		echo "Decompressing image ..."
+		xz -d -f $IMAGE
+		IMAGE=${IMAGE::-3}
+	;;
+esac
+
+partition=$(fdisk -l "$IMAGE" | grep "Disklabel type" | awk -F ": " '{print $2}' || true)
+if [ "$partition" == "dos" ]; then
+	IMAGE_INSTALL_TYPE="SD-USB"
+else
+	IMAGE_INSTALL_TYPE="EMMC"
+fi
+
+start_time=`date +%s`
+
+if [ -n "$DEVICE" ]; then
+	if [ ! -b $DEVICE ]; then
+		error_msg "'$DEVICE' is not a block device! Please make sure the device you choose is right."
+		exit -1
+	fi
+
+	if [ "$IMAGE_INSTALL_TYPE" != "SD-USB" ]; then
+		error_msg "Try to burn to SD/USB storage,but the image installation type is '$IMAGE_INSTALL_TYPE', please use 'SD-USB' image!"
+		exit -1
+	fi
+
+	echo "Burn to SD/USB: '$DEVICE'..."
+	$FLASH_TOOL -c rk3399 -d $DEVICE -p system -i $IMAGE
+else
+	if [ "$IMAGE_INSTALL_TYPE" != "EMMC" ]; then
+		error_msg "Try to burn to eMMC storage, but the image installation type is '$IMAGE_INSTALL_TYPE', please use 'EMMC' image!"
+		exit -1
+	fi
+
+	if ! lsusb | grep -q -E "2207:330c|2207:350b" > /dev/null; then
+		error_msg "You should put your board enter upgrade mode!"
+		exit -1
+	fi
+
+	echo "Burn to eMMC..."
+
+	if parted -s "$IMAGE" p 2> /dev/null | grep -q rootfs 2> /dev/null; then
+		echo "Rockchip Linux image with GPT found!"
+		IMAGE_TYPE="Linux"
+	else
+		echo "Rockchip Android image (or linux image compatible with AndroidTool one image burning) found!"
+		IMAGE_TYPE="Android"
+	fi
+
+	if [ "$IMAGE_TYPE" == "Linux" ]; then
+		echo "Try to burn Rockchip Linux image..."
+		$FLASH_TOOL -c rk3399 -p system -i $IMAGE
+	elif [ "$IMAGE_TYPE" == "Android" ]; then
+		echo "Try to burn Rockchip image..."
+		$ANDROID_TOOL UF "$IMAGE"
+	fi
+fi
+
+end_time=`date +%s`
+
+time_cal $(($end_time - $start_time))
+
+echo "Done!"
+date
